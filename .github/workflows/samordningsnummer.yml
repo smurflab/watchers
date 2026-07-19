@@ -1,0 +1,50 @@
+name: samordningsnummer
+
+on:
+  schedule:
+    # Every 5 minutes (the smallest interval GitHub allows). Note: scheduled
+    # runs can be delayed several minutes when GitHub is busy.
+    - cron: "*/5 * * * *"
+  # Lets you trigger a run by hand from the Actions tab to test it.
+  workflow_dispatch:
+
+# Don't pile up overlapping runs if one is slow.
+concurrency:
+  group: samordningsnummer
+  cancel-in-progress: false
+
+# All run steps execute inside this watcher's folder.
+defaults:
+  run:
+    working-directory: samordningsnummer
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Check for slots
+        env:
+          # Per-watcher secret so each watcher pings its own ntfy topic.
+          NTFY_TOPIC: ${{ secrets.NTFY_SAMORDNING }}
+        run: python check_slots.py
