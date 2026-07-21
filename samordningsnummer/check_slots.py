@@ -288,6 +288,38 @@ def _result_says_no_slots(page) -> bool:
     return NO_SLOTS_MARKER in body
 
 
+def _find_free_slots(page) -> list[dict]:
+    """Positive detection: bookable slots are FullCalendar events with the
+    ``ledig`` ("available") class, e.g.
+
+        <a class="fc-time-grid-event fc-event fc-start fc-end ledig" ...>
+          <div class="fc-content">
+            <div class="fc-time"><span>15:15 - 15:30</span></div>
+            <div class="fc-title">1 lediga</div>
+          </div>
+        </a>
+
+    Returns a list of {"time", "label"} dicts (empty if none are bookable).
+    """
+    slots: list[dict] = []
+    try:
+        events = page.locator("a.fc-event.ledig")
+        for i in range(events.count()):
+            ev = events.nth(i)
+            try:
+                t = (ev.locator(".fc-time").inner_text() or "").strip()
+            except Exception:
+                t = ""
+            try:
+                label = (ev.locator(".fc-title").inner_text() or "").strip()
+            except Exception:
+                label = ""
+            slots.append({"time": t, "label": label})
+    except Exception:
+        pass
+    return slots
+
+
 # --------------------------------------------------------------------------- #
 # The check
 # --------------------------------------------------------------------------- #
@@ -315,16 +347,32 @@ def check_availability() -> dict:
                 result["error"] = "Did not reach the 'Boka tid' result page."
                 return _finish(browser, result)
 
-            if _result_says_no_slots(page):
+            slots = _find_free_slots(page)
+            if slots:
+                # Positive signal: at least one bookable calendar event.
+                result["ok"] = True
+                result["available"] = True
+                lines = [
+                    f"{s['time']} ({s['label']})" if s["label"] else s["time"]
+                    for s in slots
+                ]
+                result["detail"] = (
+                    f"{len(slots)} bookable slot(s) found:\n  - "
+                    + "\n  - ".join(lines)
+                )
+            elif _result_says_no_slots(page):
                 result["ok"] = True
                 result["available"] = False
                 result["detail"] = "No free times right now."
             else:
+                # No bookable events AND no explicit 'no slots' banner. Ambiguous
+                # (site hiccup / layout change) -- do NOT alert, to avoid false
+                # alarms. Logged as inconclusive so it's visible in the run log.
                 result["ok"] = True
-                result["available"] = True
+                result["available"] = False
                 result["detail"] = (
-                    "The 'no free times' banner is GONE -- appointment slots "
-                    "appear to be available. Book now!"
+                    "Inconclusive: no bookable calendar events detected and no "
+                    "'no free times' banner either."
                 )
 
         except PWTimeout as e:
