@@ -21,8 +21,8 @@ defaults:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # ~50 min loop + setup. Well under GitHub's 6h per-job hard cap.
-    timeout-minutes: 60
+    # ~5h loop + setup, with margin under GitHub's 6h per-job hard cap.
+    timeout-minutes: 330
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -48,10 +48,11 @@ jobs:
           python -m playwright install --with-deps chromium
 
       # GitHub's native cron is heavily throttled on this account (ran ~once every
-      # 3-4h instead of every 5 min). Instead, each run loops internally for ~50
-      # min checking every 5 min, then hands off to a fresh run before the 6h job
-      # cap. This "self-loop" gives a reliable 5-min cadence 24/7.
-      - name: Watch loop (~50 min, check every 5 min)
+      # 3-4h instead of every 5 min). Instead, each run loops internally for ~5h
+      # checking every 5 min, then hands off to a fresh run before the 6h job cap.
+      # This "self-loop" gives a reliable 5-min cadence 24/7. The de-dup state
+      # file persists for the whole run, so a slot open across it pings just once.
+      - name: Watch loop (~5h, check every 5 min)
         env:
           # Per-watcher secret so each watcher pings its own ntfy topic.
           NTFY_TOPIC: ${{ secrets.NTFY_SAMORDNING }}
@@ -59,7 +60,7 @@ jobs:
           # Optional -- if unset, those are logged only, no push.
           NTFY_DEBUG_TOPIC: ${{ secrets.NTFY_SAMORDNING_DEBUG }}
         run: |
-          end=$((SECONDS + 3000))          # ~50 minutes
+          end=$((SECONDS + 18000))         # ~5 hours
           while [ $SECONDS -lt $end ]; do
             python check_slots.py || true  # never let one failed check kill the loop
             sleep 300                      # 5 minutes
