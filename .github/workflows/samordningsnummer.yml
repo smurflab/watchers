@@ -2,9 +2,11 @@ name: samordningsnummer
 
 on:
   schedule:
-    # Every 5 minutes (the smallest interval GitHub allows). Note: scheduled
-    # runs can be delayed several minutes when GitHub is busy.
-    - cron: "*/5 * * * *"
+    # Fallback only, to revive the self-loop chain if a handoff ever fails --
+    # the ~5h internal loop is the actual 5-min cadence. GitHub throttles this
+    # cron heavily anyway (observed ~once every 3-4h, not every hour), so hourly
+    # is plenty for a "is the chain still alive?" check.
+    - cron: "0 * * * *"
   # Lets you trigger a run by hand from the Actions tab to test it.
   workflow_dispatch:
 
