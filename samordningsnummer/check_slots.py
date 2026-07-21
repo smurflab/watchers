@@ -27,6 +27,7 @@ job shows green whether or not slots were found.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -313,24 +314,44 @@ def _find_free_slots(page) -> list[dict]:
           </div>
         </a>
 
-    Returns a list of {"time", "label"} dicts (empty if none are bookable).
+    Events are CSS-positioned (not nested inside a day cell), so the slot's date
+    is recovered by matching the event's horizontal centre to the day-header
+    column whose bounds contain it (each header carries data-date="YYYY-MM-DD").
+
+    Returns a list of {"key", "date", "time", "label"} dicts. "key" is a stable
+    date+time identity used for de-duplication across checks.
     """
-    slots: list[dict] = []
     try:
-        events = page.locator("a.fc-event.ledig")
-        for i in range(events.count()):
-            ev = events.nth(i)
-            try:
-                t = (ev.locator(".fc-time").inner_text() or "").strip()
-            except Exception:
-                t = ""
-            try:
-                label = (ev.locator(".fc-title").inner_text() or "").strip()
-            except Exception:
-                label = ""
-            slots.append({"time": t, "label": label})
+        raw = page.eval_on_selector_all(
+            "a.fc-event.ledig",
+            """els => els.map(el => {
+                const time  = ((el.querySelector('.fc-time') || {}).textContent || '').trim();
+                const label = ((el.querySelector('.fc-title') || {}).textContent || '').trim();
+                const r = el.getBoundingClientRect();
+                const cx = r.left + r.width / 2;
+                let date = '';
+                document.querySelectorAll(
+                    'th.fc-day-header[data-date], td.fc-day[data-date]'
+                ).forEach(h => {
+                    const hr = h.getBoundingClientRect();
+                    if (cx >= hr.left && cx <= hr.right) date = h.getAttribute('data-date');
+                });
+                return {date, time, label};
+            })""",
+        )
     except Exception:
-        pass
+        raw = []
+
+    slots: list[dict] = []
+    for s in raw or []:
+        date = (s.get("date") or "").strip()
+        t = (s.get("time") or "").strip()
+        slots.append({
+            "key": f"{date} {t}".strip(),
+            "date": date,
+            "time": t,
+            "label": (s.get("label") or "").strip(),
+        })
     return slots
 
 
@@ -339,8 +360,9 @@ def _find_free_slots(page) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 def check_availability() -> dict:
-    """Returns {"ok", "available", "detail", "error"}."""
-    result = {"ok": False, "available": False, "detail": "", "error": None}
+    """Returns {"ok", "available", "detail", "error", "slots"}."""
+    result = {"ok": False, "available": False, "detail": "", "error": None,
+              "slots": []}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -366,10 +388,8 @@ def check_availability() -> dict:
                 # Positive signal: at least one bookable calendar event.
                 result["ok"] = True
                 result["available"] = True
-                lines = [
-                    f"{s['time']} ({s['label']})" if s["label"] else s["time"]
-                    for s in slots
-                ]
+                result["slots"] = slots
+                lines = [_slot_line(s) for s in slots]
                 result["detail"] = (
                     f"{len(slots)} bookable slot(s) found:\n  - "
                     + "\n  - ".join(lines)
@@ -405,12 +425,52 @@ def _finish(browser, result):
     return result
 
 
+# --------------------------------------------------------------------------- #
+# De-duplication state
+# --------------------------------------------------------------------------- #
+#
+# Only alert for slots we haven't already alerted on. State is a JSON list of
+# slot keys from the *previous* check. It lives on the runner's temp dir, so it
+# survives across the ~5-min checks WITHIN one self-loop run (same runner), and
+# resets on the next hourly run (fresh runner) -- so a still-open slot re-pings
+# at most once per hour. Storing only the previous check's keys (not an
+# ever-growing history) means a slot that disappears and reappears correctly
+# re-alerts.
+
+STATE_FILE = os.environ.get(
+    "STATE_FILE",
+    os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "seen_slots.json"),
+)
+
+
+def _slot_line(s: dict) -> str:
+    base = f"{s['date']} {s['time']}".strip()
+    return f"{base} ({s['label']})" if s.get("label") else base
+
+
+def _load_seen() -> set[str]:
+    try:
+        with open(STATE_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_seen(keys) -> None:
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(sorted(keys), f)
+    except Exception as e:
+        print(f"  (could not write state file {STATE_FILE}: {e})", flush=True)
+
+
 def main() -> int:
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] checking availability...", flush=True)
     res = check_availability()
 
     if res["error"]:
-        # Site hiccup / exception. Don't fail the job; send a quiet health ping.
+        # Site hiccup / exception. State is left untouched (we don't know the
+        # true slot set), so recovery doesn't trigger spurious re-alerts.
         print(f"  ! error: {res['error']}", flush=True)
         notify(
             "watcher: run error",
@@ -422,13 +482,27 @@ def main() -> int:
         return 0
 
     if res["available"]:
-        notify(
-            "Samordningsnummer (London) -- appointment slot available!",
-            f"{res['detail']}\n\nBook here: {START_URL}",
-        )
+        current = {s["key"] for s in res["slots"]}
+        seen = _load_seen()
+        new = [s for s in res["slots"] if s["key"] not in seen]
+        _save_seen(current)  # remember this check's slots as the new baseline
+
+        if new:
+            lines = [_slot_line(s) for s in new]
+            notify(
+                "Samordningsnummer (London) -- new appointment slot!",
+                f"{len(new)} new slot(s):\n  - " + "\n  - ".join(lines)
+                + f"\n\nBook here: {START_URL}",
+            )
+        else:
+            print(
+                f"  slots available but all already alerted: "
+                f"{sorted(current)}",
+                flush=True,
+            )
     elif "Inconclusive" in res["detail"]:
         # Neither slots nor the 'no free times' banner -- possible layout change.
-        # Quiet ping to the debug channel so a blind bot is noticeable.
+        # Leave state untouched; quiet ping so a blind bot is noticeable.
         print(f"  ? INCONCLUSIVE: {res['detail']}", flush=True)
         notify(
             "watcher: inconclusive",
@@ -438,6 +512,8 @@ def main() -> int:
             tags="warning",
         )
     else:
+        # Confirmed no slots: clear the baseline so reappearing slots re-alert.
+        _save_seen(set())
         print(f"  no slots: {res['detail']}", flush=True)
     return 0
 
