@@ -55,6 +55,9 @@ jobs:
         env:
           # Per-watcher secret so each watcher pings its own ntfy topic.
           NTFY_TOPIC: ${{ secrets.NTFY_SAMORDNING }}
+          # Separate quiet channel for health noise (inconclusive runs / errors).
+          # Optional -- if unset, those are logged only, no push.
+          NTFY_DEBUG_TOPIC: ${{ secrets.NTFY_SAMORDNING_DEBUG }}
         run: |
           end=$((SECONDS + 3000))          # ~50 minutes
           while [ $SECONDS -lt $end ]; do

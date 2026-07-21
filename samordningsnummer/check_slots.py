@@ -65,13 +65,27 @@ USER_AGENT = (
 # Notification
 # --------------------------------------------------------------------------- #
 
-def notify(title: str, message: str) -> None:
-    """Print to the Actions log + push to ntfy.sh if NTFY_TOPIC is set."""
+def notify(
+    title: str,
+    message: str,
+    *,
+    topic_env: str = "NTFY_TOPIC",
+    priority: str = "high",
+    tags: str = "calendar",
+) -> None:
+    """Print to the Actions log + push to ntfy.sh if the chosen topic is set.
+
+    ``topic_env`` selects the channel:
+      * ``NTFY_TOPIC``       -- main channel: real slot alerts (high priority).
+      * ``NTFY_DEBUG_TOPIC`` -- quiet health channel: inconclusive runs / errors,
+        so bot-health noise never lands on the real-alert channel. Optional --
+        if the debug topic isn't set, these are logged only, no push.
+    """
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}\n[{stamp}] {title}\n{message}\n{'='*60}\n", flush=True)
-    topic = os.environ.get("NTFY_TOPIC")
+    topic = os.environ.get(topic_env)
     if not topic:
-        print("(NTFY_TOPIC not set -- no phone push sent)", flush=True)
+        print(f"({topic_env} not set -- no push sent)", flush=True)
         return
     try:
         req = urllib.request.Request(
@@ -79,14 +93,14 @@ def notify(title: str, message: str) -> None:
             data=message.encode("utf-8"),
             headers={
                 "Title": title,
-                "Priority": "high",
-                "Tags": "calendar",
+                "Priority": priority,
+                "Tags": tags,
                 "Click": START_URL,
             },
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
-        print("(ntfy push sent)", flush=True)
+        print(f"(ntfy push sent to {topic_env})", flush=True)
     except Exception as e:
         print(f"(ntfy push failed: {e})", flush=True)
 
@@ -396,14 +410,32 @@ def main() -> int:
     res = check_availability()
 
     if res["error"]:
-        # An inconclusive run (site hiccup / proxy). Don't fail the job; just log.
-        print(f"  ! inconclusive: {res['error']}", flush=True)
+        # Site hiccup / exception. Don't fail the job; send a quiet health ping.
+        print(f"  ! error: {res['error']}", flush=True)
+        notify(
+            "watcher: run error",
+            f"The check errored (not a slot signal): {res['error']}",
+            topic_env="NTFY_DEBUG_TOPIC",
+            priority="low",
+            tags="warning",
+        )
         return 0
 
     if res["available"]:
         notify(
             "Samordningsnummer (London) -- appointment slot available!",
             f"{res['detail']}\n\nBook here: {START_URL}",
+        )
+    elif "Inconclusive" in res["detail"]:
+        # Neither slots nor the 'no free times' banner -- possible layout change.
+        # Quiet ping to the debug channel so a blind bot is noticeable.
+        print(f"  ? INCONCLUSIVE: {res['detail']}", flush=True)
+        notify(
+            "watcher: inconclusive",
+            f"{res['detail']} The page layout may have changed -- worth a look.",
+            topic_env="NTFY_DEBUG_TOPIC",
+            priority="low",
+            tags="warning",
         )
     else:
         print(f"  no slots: {res['detail']}", flush=True)
