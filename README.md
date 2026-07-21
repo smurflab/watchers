@@ -37,6 +37,22 @@ stored as its own repository secret. Naming convention: `NTFY_<WATCHER>`.
 Set secrets under **Settings → Secrets and variables → Actions → New repository
 secret**. On your phone, subscribe to each topic in the ntfy app.
 
+## De-dup state (Gist KV) — alert once, ever
+
+Each self-loop run only lives ~5h before handing off to a fresh runner, whose
+disk is empty. To avoid re-alerting on a still-open slot after every handoff,
+de-dup state is stored in a **GitHub Gist** — a mutable file that outlives the
+runner. This activates when **both** secrets are set (otherwise it falls back to
+a per-run temp file, which re-pings once per handoff):
+
+| Secret     | What it is                                                          |
+| ---------- | ------------------------------------------------------------------- |
+| `GIST_PAT` | A **classic** PAT with the `gist` scope.                            |
+| `GIST_ID`  | Id of a gist containing a file named `samordning_seen_slots.json`.  |
+
+Each check does one `GET` (read state) and one `PATCH` (write state). Any API
+error is logged and the run continues on the temp-file behavior.
+
 ## Adding a new watcher
 
 1. `mkdir <name>` and add `check_*.py` + `requirements.txt`.
@@ -54,7 +70,8 @@ secret**. On your phone, subscribe to each topic in the ntfy app.
   late when GitHub is busy.
 - **Auto-disable after 60 days:** GitHub pauses scheduled workflows if the repo
   has no activity for 60 days. Any small commit re-enables them.
-- **Repeated pings:** runs are stateless, so while a condition stays true you'll
-  keep getting pings every interval until you act. Intentional.
+- **Repeated pings:** with the Gist KV state configured (see above) each slot
+  pings exactly once, ever. Without it (temp-file fallback), a still-open slot
+  re-pings once per ~5h self-loop handoff.
 
 See each watcher's own `README.md` for what it watches.

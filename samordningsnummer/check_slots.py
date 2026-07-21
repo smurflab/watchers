@@ -430,17 +430,29 @@ def _finish(browser, result):
 # --------------------------------------------------------------------------- #
 #
 # Only alert for slots we haven't already alerted on. State is a JSON list of
-# slot keys from the *previous* check. It lives on the runner's temp dir, so it
-# survives across the ~5-min checks WITHIN one self-loop run (same runner), and
-# resets on the next hourly run (fresh runner) -- so a still-open slot re-pings
-# at most once per hour. Storing only the previous check's keys (not an
-# ever-growing history) means a slot that disappears and reappears correctly
-# re-alerts.
+# slot keys from the *previous* check. Storing only the previous check's keys
+# (not an ever-growing history) means a slot that disappears and reappears
+# correctly re-alerts.
+#
+# There are two backends, chosen automatically:
+#
+#   * Gist KV (preferred in CI) -- when both GIST_PAT and GIST_ID are set, the
+#     state lives in a GitHub Gist file (GIST_FILENAME): a mutable file on
+#     GitHub's servers that OUTLIVES the runner. This means a slot stays de-duped
+#     across the ~5h self-loop handoffs too, so a still-open slot pings exactly
+#     ONCE, ever -- not once per handoff.
+#       GIST_PAT -- a classic PAT with the `gist` scope
+#       GIST_ID  -- id of the gist holding GIST_FILENAME
+#
+#   * Local file (fallback) -- a JSON file in the runner's temp dir. Survives the
+#     ~5-min checks within one self-loop run (same runner) but resets at the next
+#     run, so a still-open slot re-pings once per handoff.
 
 STATE_FILE = os.environ.get(
     "STATE_FILE",
     os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "seen_slots.json"),
 )
+GIST_FILENAME = "samordning_seen_slots.json"
 
 
 def _slot_line(s: dict) -> str:
@@ -448,7 +460,63 @@ def _slot_line(s: dict) -> str:
     return f"{base} ({s['label']})" if s.get("label") else base
 
 
+def _gist_creds() -> tuple[str, str] | None:
+    """Return (pat, gist_id) if Gist-backed state is configured, else None."""
+    pat = os.environ.get("GIST_PAT")
+    gist_id = os.environ.get("GIST_ID")
+    if pat and gist_id:
+        return pat, gist_id
+    return None
+
+
+def _gist_load(pat: str, gist_id: str) -> set[str]:
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "samordning-watcher",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        gist = json.loads(resp.read().decode("utf-8"))
+    entry = (gist.get("files") or {}).get(GIST_FILENAME)
+    if not entry:
+        return set()
+    content = (entry.get("content") or "").strip()
+    if not content:
+        return set()
+    data = json.loads(content)
+    return set(data) if isinstance(data, list) else set()
+
+
+def _gist_save(pat: str, gist_id: str, keys) -> None:
+    body = json.dumps(
+        {"files": {GIST_FILENAME: {"content": json.dumps(sorted(keys))}}}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {pat}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "samordning-watcher",
+            "Content-Type": "application/json",
+        },
+        method="PATCH",
+    )
+    urllib.request.urlopen(req, timeout=15).read()
+
+
 def _load_seen() -> set[str]:
+    creds = _gist_creds()
+    if creds:
+        try:
+            return _gist_load(*creds)
+        except Exception as e:
+            print(f"  (could not read state from gist: {e})", flush=True)
+            return set()
     try:
         with open(STATE_FILE) as f:
             return set(json.load(f))
@@ -457,6 +525,13 @@ def _load_seen() -> set[str]:
 
 
 def _save_seen(keys) -> None:
+    creds = _gist_creds()
+    if creds:
+        try:
+            _gist_save(*creds, keys)
+        except Exception as e:
+            print(f"  (could not write state to gist: {e})", flush=True)
+        return
     try:
         with open(STATE_FILE, "w") as f:
             json.dump(sorted(keys), f)

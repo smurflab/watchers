@@ -52,8 +52,10 @@ jobs:
       # GitHub's native cron is heavily throttled on this account (ran ~once every
       # 3-4h instead of every 5 min). Instead, each run loops internally for ~5h
       # checking every 5 min, then hands off to a fresh run before the 6h job cap.
-      # This "self-loop" gives a reliable 5-min cadence 24/7. The de-dup state
-      # file persists for the whole run, so a slot open across it pings just once.
+      # This "self-loop" gives a reliable 5-min cadence 24/7. De-dup state is kept
+      # in a Gist (GIST_PAT/GIST_ID) so it survives across handoffs -- a slot open
+      # across runs pings exactly once. Without those secrets it falls back to a
+      # per-run temp file (still de-dups within a run, re-pings once per handoff).
       - name: Watch loop (~5h, check every 5 min)
         env:
           # Per-watcher secret so each watcher pings its own ntfy topic.
@@ -61,6 +63,11 @@ jobs:
           # Separate quiet channel for health noise (inconclusive runs / errors).
           # Optional -- if unset, those are logged only, no push.
           NTFY_DEBUG_TOPIC: ${{ secrets.NTFY_SAMORDNING_DEBUG }}
+          # Gist KV for de-dup state: persists across self-loop handoffs so a
+          # still-open slot pings exactly once, ever (not once per handoff).
+          # Both must be set to activate; otherwise it falls back to a temp file.
+          GIST_PAT: ${{ secrets.GIST_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
           end=$((SECONDS + 18000))         # ~5 hours
           while [ $SECONDS -lt $end ]; do
