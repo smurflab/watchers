@@ -1,12 +1,14 @@
 name: samordningsnummer
 
 on:
-  schedule:
-    # Fallback only, to revive the self-loop chain if a handoff ever fails --
-    # the ~5h internal loop is the actual 5-min cadence. GitHub throttles this
-    # cron heavily anyway (observed ~once every 3-4h, not every hour), so hourly
-    # is plenty for a "is the chain still alive?" check.
-    - cron: "0 * * * *"
+  # Scheduled runs are DISABLED for now -- the workflow will not start on its own.
+  # Re-enable by uncommenting the schedule block below.
+  # schedule:
+  #   # Fallback only, to revive the self-loop chain if a handoff ever fails --
+  #   # the ~5h internal loop is the actual 5-min cadence. GitHub throttles this
+  #   # cron heavily anyway (observed ~once every 3-4h, not every hour), so hourly
+  #   # is plenty for a "is the chain still alive?" check.
+  #   - cron: "0 * * * *"
   # Lets you trigger a run by hand from the Actions tab to test it.
   workflow_dispatch:
 
