@@ -47,6 +47,10 @@ START_URL = "https://ventus.enalog.se/Booking/Booking/Index/UDDLondon"
 # "Ärende" radio -> matched by visible label (survives id changes).
 SERVICE_LABEL = "Passansökan"
 
+# Weeks to scan, starting at the week "Första lediga tid" jumps to. Each extra
+# week is one "Nästa vecka" page load.
+WEEKS_TO_SCAN = int(os.environ.get("WEEKS_TO_SCAN", "8"))
+
 # Timetable shows this when nothing is bookable.
 NO_SLOTS_MARKER = "inga lediga tider kunde hittas"
 
@@ -207,6 +211,54 @@ def _find_free_slots(page) -> list[dict]:
     return slots
 
 
+def _scan_weeks(page) -> list[dict]:
+    """Collect slots from the current week plus the following weeks, up to
+    WEEKS_TO_SCAN in total, by clicking 'Nästa vecka' (which submits the search
+    form). Slots are de-duplicated by key and returned in date/time order."""
+    found: dict[str, dict] = {}
+    for week in range(1, WEEKS_TO_SCAN + 1):
+        week_slots = _find_free_slots(page)
+        for s in week_slots:
+            found.setdefault(s["key"], s)
+        _step(f"week {week}/{WEEKS_TO_SCAN} ({_week_label(page)}): "
+              f"{len(week_slots)} slot(s).")
+        if week == WEEKS_TO_SCAN:
+            break
+        nxt = page.locator("#nextweek")
+        if nxt.count() == 0:
+            _step("no 'Nästa vecka' link; stopping scan.")
+            break
+        # Wait until the new week's timetable is actually rendered (header dates
+        # changed), not just until the navigation started.
+        prev = _week_label(page)
+        try:
+            nxt.click()
+            page.wait_for_function(
+                """prev => {
+                    const ids = [...document.querySelectorAll(
+                        'table.timetable thead th[id]')].map(e => e.id);
+                    return ids.length > 0 && `${ids[0]}..${ids[ids.length-1]}` !== prev;
+                }""",
+                arg=prev,
+                timeout=20_000,
+            )
+            page.wait_for_load_state("domcontentloaded")
+        except Exception as e:
+            _step(f"could not load next week ({e}); stopping scan.")
+            break
+    return sorted(found.values(), key=lambda s: s["key"])
+
+
+def _week_label(page) -> str:
+    try:
+        ids = page.eval_on_selector_all(
+            "table.timetable thead th[id]", "els => els.map(e => e.id)"
+        )
+        return f"{ids[0]}..{ids[-1]}" if ids else "?"
+    except Exception:
+        return "?"
+
+
 def _result_says_no_slots(page) -> bool:
     try:
         body = (page.locator("body").inner_text() or "").lower()
@@ -244,7 +296,8 @@ def check_availability() -> dict:
             except Exception:
                 _step("timetable not seen within timeout.")
 
-            slots = _find_free_slots(page)
+            no_slots_banner = _result_says_no_slots(page)
+            slots = _scan_weeks(page)
             if slots:
                 result["ok"] = True
                 result["available"] = True
@@ -254,7 +307,7 @@ def check_availability() -> dict:
                     f"{len(slots)} bookable slot(s) found:\n  - "
                     + "\n  - ".join(lines)
                 )
-            elif _result_says_no_slots(page):
+            elif no_slots_banner:
                 result["ok"] = True
                 result["available"] = False
                 result["detail"] = "No free times right now."

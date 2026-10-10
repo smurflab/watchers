@@ -8,7 +8,8 @@ slots appear.
 Booking page: https://ventus.enalog.se/Booking/Booking/Index/UDDLondon
 
 - It clicks through the consent steps (Avtal → Ärende → Villkorlig avtalssida),
-  presses **"Första lediga tid"**, and reads the timetable. It never picks a
+  presses **"Första lediga tid"**, then reads that week plus the next 7 (set
+  `WEEKS_TO_SCAN` to change). It never picks a
   time or enters personal data.
 - When you get the ping, open the booking page and finish it yourself.
 
