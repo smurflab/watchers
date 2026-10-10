@@ -1,0 +1,87 @@
+name: passport
+
+on:
+  schedule:
+    # Fallback only, to revive the self-loop chain if a handoff ever fails --
+    # the ~5h internal loop is the actual 5-min cadence.
+    - cron: "0 * * * *"
+  # Lets you trigger a run by hand from the Actions tab to test it.
+  workflow_dispatch:
+
+# Don't pile up overlapping runs if one is slow.
+concurrency:
+  group: passport
+  cancel-in-progress: false
+
+# All run steps execute inside this watcher's folder.
+defaults:
+  run:
+    working-directory: passport
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # ~5h loop + setup, with margin under GitHub's 6h per-job hard cap.
+    timeout-minutes: 330
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache pip's wheel download cache, keyed on requirements.txt.
+          # With playwright pinned, the wheel is reused instead of re-downloaded.
+          cache: 'pip'
+          cache-dependency-path: passport/requirements.txt
+
+      - name: Cache Playwright browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      # GitHub's native cron is heavily throttled on this account (ran ~once every
+      # 3-4h instead of every 5 min). Instead, each run loops internally for ~5h
+      # checking every 5 min, then hands off to a fresh run before the 6h job cap.
+      # This "self-loop" gives a reliable 5-min cadence 24/7. De-dup state is kept
+      # in a Gist (GIST_PAT/GIST_ID) so it survives across handoffs -- a slot open
+      # across runs pings exactly once. Without those secrets it falls back to a
+      # per-run temp file (still de-dups within a run, re-pings once per handoff).
+      - name: Watch loop (~5h, check every 5 min)
+        env:
+          # Per-watcher secret so each watcher pings its own ntfy topic.
+          NTFY_TOPIC: ${{ secrets.NTFY_PASSPORT }}
+          # Separate quiet channel for health noise (inconclusive runs / errors).
+          # Optional -- if unset, those are logged only, no push.
+          NTFY_DEBUG_TOPIC: ${{ secrets.NTFY_PASSPORT_DEBUG }}
+          # Gist KV for de-dup state: persists across self-loop handoffs so a
+          # still-open slot pings exactly once, ever (not once per handoff).
+          # Both must be set to activate; otherwise it falls back to a temp file.
+          GIST_PAT: ${{ secrets.GIST_PAT }}
+          GIST_ID: ${{ secrets.GIST_ID }}
+        run: |
+          end=$((SECONDS + 18000))         # ~5 hours
+          while [ $SECONDS -lt $end ]; do
+            python check_slots.py || true  # never let one failed check kill the loop
+            sleep 300                      # 5 minutes
+          done
+
+      # Start the next run before this job exits, so the chain self-perpetuates.
+      # Needs a PAT (the default GITHUB_TOKEN cannot trigger new workflow runs).
+      - name: Re-dispatch next run (self-loop handoff)
+        if: always()                       # hand off even if the loop step errored
+        env:
+          GH_PAT: ${{ secrets.DISPATCH_PAT }}
+        run: |
+          curl -sf -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/smurflab/watchers/actions/workflows/passport.yml/dispatches \
+            -d '{"ref":"main"}'

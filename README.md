@@ -33,6 +33,7 @@ stored as its own repository secret. Naming convention: `NTFY_<WATCHER>`.
 | Watcher            | Workflow                | Secret name       |
 | ------------------ | ----------------------- | ----------------- |
 | `samordningsnummer`| `samordningsnummer.yml` | `NTFY_SAMORDNING` |
+| `passport`         | `passport.yml`          | `NTFY_PASSPORT`   |
 
 Set secrets under **Settings → Secrets and variables → Actions → New repository
 secret**. On your phone, subscribe to each topic in the ntfy app.
@@ -48,7 +49,7 @@ a per-run temp file, which re-pings once per handoff):
 | Secret     | What it is                                                          |
 | ---------- | ------------------------------------------------------------------- |
 | `GIST_PAT` | A **classic** PAT with the `gist` scope.                            |
-| `GIST_ID`  | Id of a gist containing a file named `samordning_seen_slots.json`.  |
+| `GIST_ID`  | Id of the shared gist; each watcher uses its own file in it (`samordning_seen_slots.json`, `passport_seen_slots.json`). |
 
 Each check does one `GET` (read state) and one `PATCH` (write state). Any API
 error is logged and the run continues on the temp-file behavior.
