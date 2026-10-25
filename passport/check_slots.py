@@ -71,20 +71,22 @@ def notify(
     topic_env: str = "NTFY_TOPIC",
     priority: str = "high",
     tags: str = "calendar",
-) -> None:
+) -> bool:
     """Print to the Actions log + push to ntfy.sh if the chosen topic is set.
 
     ``topic_env`` selects the channel:
       * ``NTFY_TOPIC``       -- main channel: real slot alerts (high priority).
       * ``NTFY_DEBUG_TOPIC`` -- quiet health channel: inconclusive runs / errors.
         Optional -- if unset, these are logged only, no push.
+
+    Returns True only if the push was accepted by ntfy.
     """
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{'='*60}\n[{stamp}] {title}\n{message}\n{'='*60}\n", flush=True)
     topic = os.environ.get(topic_env)
     if not topic:
         print(f"({topic_env} not set -- no push sent)", flush=True)
-        return
+        return False
     try:
         req = urllib.request.Request(
             f"https://ntfy.sh/{topic}",
@@ -99,8 +101,10 @@ def notify(
         )
         urllib.request.urlopen(req, timeout=10)
         print(f"(ntfy push sent to {topic_env})", flush=True)
+        return True
     except Exception as e:
         print(f"(ntfy push failed: {e})", flush=True)
+        return False
 
 
 def _step(msg: str) -> None:
@@ -166,55 +170,44 @@ def _walk_to_timetable(page) -> str | None:
 # --------------------------------------------------------------------------- #
 
 def _find_free_slots(page) -> list[dict]:
-    """Positive detection: bookable slots are clickable timetable cells,
+    """Positive detection: bookable slots are clickable timetable cells that
+    carry their exact start time, e.g.
 
-        <td class="timetable-cells"><div class="cellcontainer">
-          <div data-function="timeTableCell" ...>09:00</div>
-        </td>
+        <div data-function="timeTableCell" data-fromdatetime="2027-04-22 09:00:00"
+             aria-label="2027-04-22 09:00:00" ...>
 
-    One <td> per weekday, in the same order as the header <th id="YYYY-MM-DD">,
-    so a cell's date is its column's header id.
-
-    Returns a list of {"key", "date", "time", "label"} dicts. "key" is a stable
-    date+time identity used for de-duplication across checks.
+    (The cell's text also contains a <script>/<noscript> block, so it is not
+    used.) Returns a list of {"key", "date", "time"} dicts, where "key" is
+    "YYYY-MM-DD HH:MM", a stable identity used for de-duplication.
     """
     try:
         raw = page.eval_on_selector_all(
             "[data-function=timeTableCell]",
-            """els => {
-                const heads = [...document.querySelectorAll('table.timetable thead th')];
-                return els.map(el => {
-                    const td = el.closest('td');
-                    const idx = td ? [...td.parentElement.children].indexOf(td) : -1;
-                    const th = idx >= 0 ? heads[idx] : null;
-                    return {
-                        date: (th && th.id) || '',
-                        time: (el.textContent || '').trim().replace(/\\s+/g, ' '),
-                        label: el.getAttribute('aria-label') || '',
-                    };
-                });
-            }""",
+            "els => els.map(el => el.getAttribute('data-fromdatetime')"
+            " || el.getAttribute('aria-label') || '')",
         )
     except Exception:
         raw = []
 
     slots: list[dict] = []
-    for s in raw or []:
-        date = (s.get("date") or "").strip()
-        t = (s.get("time") or "").strip()
-        slots.append({
-            "key": f"{date} {t}".strip(),
-            "date": date,
-            "time": t,
-            "label": (s.get("label") or "").strip(),
-        })
+    for value in raw or []:
+        parts = (value or "").strip().split()
+        if len(parts) < 2:
+            continue
+        date, t = parts[0], parts[1][:5]
+        slots.append({"key": f"{date} {t}", "date": date, "time": t})
     return slots
 
 
 def _scan_weeks(page) -> list[dict]:
     """Collect slots from the current week plus the following weeks, up to
-    WEEKS_TO_SCAN in total, by clicking 'Nästa vecka' (which submits the search
-    form). Slots are de-duplicated by key and returned in date/time order."""
+    WEEKS_TO_SCAN in total. Slots are de-duplicated by key and returned in
+    date/time order.
+
+    Each step sets the date picker to the 'Nästa vecka' date and presses
+    'Sök tid' (clicking the link itself does not run a search). A week past the
+    end of the booking window renders no timetable at all; that ends the scan.
+    """
     found: dict[str, dict] = {}
     for week in range(1, WEEKS_TO_SCAN + 1):
         week_slots = _find_free_slots(page)
@@ -224,27 +217,21 @@ def _scan_weeks(page) -> list[dict]:
               f"{len(week_slots)} slot(s).")
         if week == WEEKS_TO_SCAN:
             break
-        nxt = page.locator("#nextweek")
-        if nxt.count() == 0:
-            _step("no 'Nästa vecka' link; stopping scan.")
+        next_date = page.locator("#nextweek").get_attribute("data-date") \
+            if page.locator("#nextweek").count() else None
+        if not next_date:
+            _step("no 'Nästa vecka' date; stopping scan.")
             break
-        # Wait until the new week's timetable is actually rendered (header dates
-        # changed), not just until the navigation started.
-        prev = _week_label(page)
         try:
-            nxt.click()
-            page.wait_for_function(
-                """prev => {
-                    const ids = [...document.querySelectorAll(
-                        'table.timetable thead th[id]')].map(e => e.id);
-                    return ids.length > 0 && `${ids[0]}..${ids[ids.length-1]}` !== prev;
-                }""",
-                arg=prev,
-                timeout=20_000,
-            )
-            page.wait_for_load_state("domcontentloaded")
+            page.locator("#datepicker").evaluate("(el, d) => { el.value = d; }", next_date)
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                page.locator("input[name=TimeSearchButton]").click()
         except Exception as e:
             _step(f"could not load next week ({e}); stopping scan.")
+            break
+        if page.locator("table.timetable").count() == 0:
+            _step(f"no timetable for week of {next_date} -- end of the booking "
+                  "window; stopping scan.")
             break
     return sorted(found.values(), key=lambda s: s["key"])
 
@@ -455,16 +442,21 @@ def main() -> int:
         current = {s["key"] for s in res["slots"]}
         seen = _load_seen()
         new = [s for s in res["slots"] if s["key"] not in seen]
-        _save_seen(current)
 
         if new:
             lines = [_slot_line(s) for s in new]
-            notify(
+            shown = lines[:20]
+            more = f"\n  ... and {len(lines) - 20} more" if len(lines) > 20 else ""
+            sent = notify(
                 "Passport (London) -- new appointment slot!",
-                f"{len(new)} new slot(s):\n  - " + "\n  - ".join(lines)
+                f"{len(new)} new slot(s):\n  - " + "\n  - ".join(shown) + more
                 + f"\n\nBook here: {START_URL}",
             )
+            # Only count slots as alerted once the push actually went out, so a
+            # failed push is retried on the next check instead of lost.
+            _save_seen(current if sent else current & seen)
         else:
+            _save_seen(current)
             print(
                 f"  slots available but all already alerted: "
                 f"{sorted(current)}",
